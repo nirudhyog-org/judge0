@@ -42,6 +42,7 @@ To see Judge0 in action, try [Judge0 IDE](https://ide.judge0.com) - our free and
 * Compilation and execution of multi-file programs
 * Support for additional files alongside the user's program
 * Support for custom user-defined compiler options, command-line arguments, and time and memory limits
+* **S3 Test Cases Support** - Download and execute against test cases stored in Amazon S3
 * Detailed execution results
 * Webhooks (HTTP callbacks)
 
@@ -62,6 +63,79 @@ Our infrastructure allows you to **focus on building your product** and forget a
 ### Sulu or RapidAPI plans are not (good) enough for you?
 
 Let's talk. [Contact us](mailto:contact@judge0.com).
+
+## S3 Test Cases
+
+Judge0 now supports downloading and executing submissions against test cases stored in Amazon S3. This feature is perfect for programming contests, educational platforms, and automated assessment systems.
+
+### Example Request
+
+```bash
+POST /submissions
+Content-Type: application/json
+
+{
+  "source_code": "#include <iostream>\nusing namespace std;\nint main() {\n    int a, b;\n    cin >> a >> b;\n    cout << a + b << endl;\n    return 0;\n}",
+  "language_id": 54,
+  "s3_test_cases": "https://my-bucket.s3.amazonaws.com/contest1/testcases.json"
+}
+```
+
+### S3 Test Case File Format
+
+```json
+{
+  "test_cases": [
+    {
+      "name": "Basic Addition",
+      "input": "5 3",
+      "output": "8"
+    },
+    {
+      "name": "Negative Numbers", 
+      "input": "10 -2",
+      "output": "8"
+    }
+  ]
+}
+```
+
+### How It Works
+
+```
+┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
+│   Client App    │    │     Judge0      │    │   Amazon S3     │
+└─────────────────┘    └─────────────────┘    └─────────────────┘
+         │                       │                       │
+         │  POST /submissions    │                       │
+         │ (with s3_test_cases)  │                       │
+         │──────────────────────►│                       │
+         │                       │                       │
+         │                       │  Download test cases  │
+         │                       │──────────────────────►│
+         │                       │                       │
+         │                       │  Test case files     │
+         │                       │◄──────────────────────│
+         │                       │                       │
+         │                       │ Compile & Execute     │
+         │                       │ against each test     │
+         │                       │ case individually     │
+         │                       │                       │
+         │  Submission results   │                       │
+         │  (with test case      │                       │
+         │   pass/fail summary)  │                       │
+         │◄──────────────────────│                       │
+```
+
+### Supported URL Formats
+
+* Single S3 URL: `"https://bucket.s3.amazonaws.com/testcases.json"`
+* JSON Array: `["https://bucket.s3.amazonaws.com/test1.json", "https://bucket.s3.amazonaws.com/test2.json"]`
+* Newline separated: 
+  ```
+  https://bucket.s3.amazonaws.com/test1.json
+  https://bucket.s3.amazonaws.com/test2.json
+  ```
 
 ## Flavors
 
