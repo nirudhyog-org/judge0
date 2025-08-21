@@ -163,6 +163,36 @@ class Submission < ApplicationRecord
     language.try(:is_project) || false
   end
 
+  def s3_test_cases
+    @decoded_s3_test_cases ||= Base64Service.decode(self[:s3_test_cases])
+  end
+
+  def s3_test_cases=(value)
+    super(value)
+    self[:s3_test_cases] = Base64Service.encode(self[:s3_test_cases])
+  end
+
+  def downloaded_test_cases
+    return @downloaded_test_cases if @downloaded_test_cases
+    
+    if s3_test_cases.present?
+      begin
+        @downloaded_test_cases = S3TestCaseService.download_and_parse_test_cases(s3_test_cases)
+      rescue => e
+        Rails.logger.error "Failed to download S3 test cases for submission #{id}: #{e.message}"
+        @downloaded_test_cases = []
+      end
+    else
+      @downloaded_test_cases = []
+    end
+    
+    @downloaded_test_cases
+  end
+
+  def has_s3_test_cases?
+    s3_test_cases.present?
+  end
+
   private
 
   def language_existence

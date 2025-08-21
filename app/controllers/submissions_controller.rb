@@ -177,7 +177,8 @@ class SubmissionsController < ApplicationController
       :redirect_stderr_to_stdout,
       :callback_url,
       :additional_files,
-      :enable_network
+      :enable_network,
+      :s3_test_cases
     )
 
     submission_params[:additional_files] = Base64Service.decode(submission_params[:additional_files])
@@ -186,6 +187,7 @@ class SubmissionsController < ApplicationController
       submission_params[:source_code] = Base64Service.decode(submission_params[:source_code])
       submission_params[:stdin] = Base64Service.decode(submission_params[:stdin])
       submission_params[:expected_output] = Base64Service.decode(submission_params[:expected_output])
+      submission_params[:s3_test_cases] = Base64Service.decode(submission_params[:s3_test_cases])
     end
 
     submission_params

@@ -18,6 +18,23 @@ class IsolateJob < ApplicationJob
     @submission = Submission.find(submission_id)
     submission.update(status: Status.process, started_at: DateTime.now, execution_host: ENV["HOSTNAME"])
 
+    if submission.has_s3_test_cases?
+      process_with_s3_test_cases
+    else
+      process_with_regular_test_case
+    end
+
+  rescue Exception => e
+    raise e.message unless submission
+    submission.update(message: e.message, status: Status.boxerr, finished_at: DateTime.now)
+    cleanup(raise_exception = false)
+  ensure
+    call_callback
+  end
+
+  private
+
+  def process_with_regular_test_case
     time = []
     memory = []
 
@@ -40,16 +57,97 @@ class IsolateJob < ApplicationJob
     submission.time = time.inject(&:+).to_f / time.size
     submission.memory = memory.inject(&:+).to_f / memory.size
     submission.save
-
-  rescue Exception => e
-    raise e.message unless submission
-    submission.update(message: e.message, status: Status.boxerr, finished_at: DateTime.now)
-    cleanup(raise_exception = false)
-  ensure
-    call_callback
   end
 
-  private
+  def process_with_s3_test_cases
+    begin
+      test_cases = submission.downloaded_test_cases
+      
+      if test_cases.empty?
+        submission.update(
+          message: "No test cases found in S3 URLs",
+          status: Status.boxerr,
+          finished_at: DateTime.now
+        )
+        return
+      end
+
+      time = []
+      memory = []
+      passed_test_cases = 0
+      total_test_cases = test_cases.size
+      failed_test_case_info = nil
+
+      # Compile once before running test cases
+      initialize_workdir
+      if compile == :failure
+        cleanup
+        return
+      end
+
+      test_cases.each_with_index do |test_case, index|
+        puts "[#{DateTime.now}] Running test case #{index + 1}/#{total_test_cases}: #{test_case[:name]}"
+        
+        # Prepare stdin for this test case
+        File.open(stdin_file, "wb") { |f| f.write(test_case[:input] || '') }
+        
+        run
+        verify_test_case(test_case)
+
+        time << submission.time
+        memory << submission.memory
+
+        if submission.status == Status.ac
+          passed_test_cases += 1
+        else
+          # Store info about first failed test case
+          if failed_test_case_info.nil?
+            failed_test_case_info = {
+              name: test_case[:name],
+              status: submission.status,
+              expected: test_case[:output],
+              actual: submission.stdout,
+              stderr: submission.stderr,
+              message: submission.message
+            }
+          end
+          # Don't break - continue running all test cases for complete feedback
+        end
+
+        # Reset status for next test case
+        submission.status = Status.queue
+      end
+
+      # Set final results
+      submission.time = time.inject(&:+).to_f / time.size
+      submission.memory = memory.inject(&:+).to_f / memory.size
+      submission.finished_at = DateTime.now
+
+      # Determine final status
+      if passed_test_cases == total_test_cases
+        submission.status = Status.ac
+        submission.message = "All #{total_test_cases} test cases passed"
+      else
+        # Use the status from the first failed test case
+        submission.status = failed_test_case_info[:status]
+        submission.stdout = failed_test_case_info[:actual]
+        submission.stderr = failed_test_case_info[:stderr]
+        submission.message = "Failed #{total_test_cases - passed_test_cases}/#{total_test_cases} test cases. First failure: #{failed_test_case_info[:name]}"
+      end
+
+      submission.save
+      cleanup
+
+    rescue => e
+      Rails.logger.error "Error processing S3 test cases: #{e.message}"
+      submission.update(
+        message: "Error processing S3 test cases: #{e.message}",
+        status: Status.boxerr,
+        finished_at: DateTime.now
+      )
+      cleanup(raise_exception = false)
+    end
+  end
 
   def initialize_workdir
     @box_id = submission.id%2147483647
@@ -271,6 +369,41 @@ class IsolateJob < ApplicationJob
     submission.exit_signal = metadata[:exitsig].try(:to_i)
     submission.message = metadata[:message]
     submission.status = determine_status(metadata[:status], submission.exit_signal)
+  end
+
+  def verify_test_case(test_case)
+    metadata = get_metadata
+
+    program_stdout = File.read(stdout_file)
+    program_stdout = nil if program_stdout.empty?
+
+    program_stderr = File.read(stderr_file)
+    program_stderr = nil if program_stderr.empty?
+
+    submission.time = metadata[:time]
+    submission.wall_time = metadata[:"time-wall"]
+    submission.memory = (cgroups.present? ? metadata[:"cg-mem"] : metadata[:"max-rss"])
+    submission.stdout = program_stdout
+    submission.stderr = program_stderr
+    submission.exit_code = metadata[:exitcode].try(:to_i) || 0
+    submission.exit_signal = metadata[:exitsig].try(:to_i)
+    submission.message = metadata[:message]
+    
+    # Determine status based on execution and expected output comparison
+    base_status = determine_base_status(metadata[:status], submission.exit_signal)
+    
+    if base_status == Status.ac && test_case[:output].present?
+      # Compare with expected output for this test case
+      if strip(test_case[:output]) == strip(submission.stdout)
+        submission.status = Status.ac
+      else
+        submission.status = Status.wa
+      end
+    else
+      submission.status = base_status
+    end
+
+    reset_metadata_file
 
     # After adding support for compiler_options and command_line_arguments
     # status "Exec Format Error" will no longer occur because compile and run
@@ -347,6 +480,18 @@ class IsolateJob < ApplicationJob
   end
 
   def determine_status(status, exit_signal)
+    base_status = determine_base_status(status, exit_signal)
+    return base_status unless base_status == Status.ac
+    
+    # Only check expected_output for regular submissions (not S3 test cases)
+    if submission.expected_output.nil? || strip(submission.expected_output) == strip(submission.stdout)
+      return Status.ac
+    else
+      return Status.wa
+    end
+  end
+
+  def determine_base_status(status, exit_signal)
     if status == "TO"
       return Status.tle
     elsif status == "SG"
@@ -355,10 +500,8 @@ class IsolateJob < ApplicationJob
       return Status.nzec
     elsif status == "XX"
       return Status.boxerr
-    elsif submission.expected_output.nil? || strip(submission.expected_output) == strip(submission.stdout)
-      return Status.ac
     else
-      return Status.wa
+      return Status.ac
     end
   end
 
